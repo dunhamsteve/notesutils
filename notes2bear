@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+import zlib, os, sqlite3, re, zipfile, json
+from struct import unpack_from
+from datetime import datetime
+
+# Simple script to export Notes.app to Bear.app backup format
+# I have code to decode the tables and drawings (to svg), but not necessary for Bear
+
+def uvarint(data,pos):
+    x = s = 0
+    while True:
+        b = data[pos]
+        pos += 1
+        x = x | ((b&0x7f)<<s)
+        if b < 0x80: return x,pos
+        s += 7
+
+def readbytes(data,pos):
+    l,pos = uvarint(data,pos)
+    return data[pos:pos+l], pos+l
+
+def readstruct(fmt,l):
+    return lambda data,pos: (unpack_from(fmt,data,pos)[0],pos+l)
+
+readers = [ uvarint, readstruct('<d',8), readbytes, None, None, readstruct('<f',4) ]
+
+def parse(data, schema):
+    "parses a protobuf"
+    obj = {}
+    pos = 0
+    while pos < len(data):
+        val,pos = uvarint(data,pos)
+        typ = val & 7
+        key = val >> 3
+        val, pos = readers[typ](data,pos)
+        if key not in schema: 
+            continue
+        name, repeated, typ = schema[key]
+        if isinstance(typ, dict):
+            val = parse(val, typ)
+        if typ == 'string':
+            val = val.decode('utf8')
+        if repeated:
+            val = obj.get(name,[]) + [val]
+        obj[name] = val
+    return obj
+
+def translate(data, media):
+    styles = {0: '# ', 1: '## ',100: '* ', 101: '* ', 102: '1. ', 103: '- '}
+    rval = []
+    refs = []
+    txt = data['string']
+    pos = 0
+    acc = None
+    pre = False
+    for run in data['attributeRun']:
+        l = run['length']
+        for frag in re.findall(r'\n|[^\n]+',txt[pos:pos+l]):
+            if acc is None: # start paragraph
+                pstyle = run.get('paragraphStyle',{}).get('style')
+                indent = run.get('paragraphStyle',{}).get('indent',0)
+                acc = "  "*indent+styles.get(pstyle,"")
+                if pstyle == 103 and run['paragraphStyle']['todo']['done']:
+                    acc = "  "*indent+"+ "
+                if pstyle == 4:
+                    if not pre: 
+                        rval.append("```")
+                elif pre:
+                    rval.append("```")
+                pre = pstyle == 4
+            if frag == '\n': # end paragraph
+                rval.append(acc)
+                acc = None
+            else: # accumulate and handle inline styles - although bear doesn't seem to support nested ones. 
+                link = run.get('link')
+                info = run.get('attachmentInfo')
+                style = run.get('fontHints',0) + 4*run.get('underline',0) + 8*run.get('strikethrough',0)
+                if style & 1: frag = f'*{frag}*'
+                if style & 2: frag = f'/{frag}/'
+                if style & 4: frag = f'_{frag}_'
+                if style & 8: frag = f'~{frag}~'
+                if link: frag = f'[{frag}]({link})'
+                if info:
+                    id = info.get('attachmentIdentifier')
+                    fn = media.get(id)
+                    if fn:
+                        _,e = os.path.splitext(fn)
+                        acc += f'[assets/{id}{e}]'
+                        refs.append(id)
+                    else:
+                        acc += f"ATTACH {info}"
+                else:
+                    acc += frag
+        pos += l
+    if acc: rval.append(acc)
+    rval = '\n'.join(rval)+"\n"
+    return rval,refs
+
+# The schema subset needed for bear export
+docschema = { 
+    2: [ "version", 1, { 
+        3: [ "data", 0, {
+            2: [ "string", 0, "string"],
+            5: [ "attributeRun", 1, {
+                1: ["length",0,0],
+                2: ["paragraphStyle", 0, {
+                    1: ["style", 0,0],
+                    4: ["indent",0,0],
+                    5: ["todo",0,{ 
+                        1: ["todoUUID", 0, "bytes"],
+                        2: ["done",0,0]
+                    }]
+                }],
+                5: ["fontHints",0,0],
+                6: ["underline",0,0],
+                7: ["strikethrough",0,0],
+                9: [ "link", 0, "string" ],
+                12: [ "attachmentInfo", 0, {
+                    1: [ "attachmentIdentifier", 0, "string"],
+                    2: [ "typeUTI", 0, "string"]
+                }]
+            }]
+        }]
+    }]
+}
+
+if __name__ == '__main__':
+    root = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes")
+    db = sqlite3.Connection(os.path.join(root,'NoteStore.sqlite'))
+    media = {} # there is some indirection for attachments
+    for a,b,fn in db.execute('select a.zidentifier, b.zidentifier, b.zfilename from ziccloudsyncingobject a left join ziccloudsyncingobject b on a.zmedia = b.z_pk'):
+        if fn:
+            full = os.path.join(root,'Media',b,fn)
+        else:
+            full = os.path.join(root,'FallbackImages',a+".jpg")
+        if os.path.exists(full):
+            media[a] = full
+
+    count = 0
+    with zipfile.ZipFile('notes.bearbk','w') as zip:
+        for id, title, data, cdate, mdate in db.execute('select o.zidentifier, ztitle1, zdata, o.zcreationdate1, o.zmodificationdate1 from zicnotedata join ziccloudsyncingobject o on znotedata = zicnotedata.z_pk where zicnotedata.zcryptotag is null'):
+            ze = f'notes.bearbk/{id}.textbundle'
+            if data:
+                pb = zlib.decompress(data, 47)
+                doc = parse(pb, docschema)['version'][0]['data']
+                if not doc['string']: continue # some are blank
+                text,refs = translate(doc, media)
+                info = {
+                    "type":"public.plain-text", 
+                    "creatorIdentifier": "net.shinyfrog.bear",
+                    "net.shinyfrog.bear": { 
+                        "modificationDate": datetime.fromtimestamp(int(mdate)+978307200).isoformat(),
+                        "creationDate": datetime.fromtimestamp(int(cdate)+978307200).isoformat()
+                    },
+                    "version":2
+                }
+                zip.writestr(f'{ze}/info.json',json.dumps(info))
+                zip.writestr(f'{ze}/text.txt',text)
+                for ref in refs:
+                    _,e = os.path.splitext(media[ref])
+                    fn = f'{ze}/assets/{ref}{e}'
+                    zip.write(media[ref],fn)
+                count += 1
+    print(f"wrote {count} notes to notes.bearbk")
+
