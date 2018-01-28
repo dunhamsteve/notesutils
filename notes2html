@@ -12,7 +12,7 @@ def append(rval,a):
         if i<0:
             rval.text = (rval.text or "")+a
         else:
-            rval[i].text = (rval[i].text or "")+a
+            rval[i].tail = (rval[i].tail or "")+a
     elif isinstance(a,ET.Element):
         rval.append(a)
     elif isinstance(a,dict):
