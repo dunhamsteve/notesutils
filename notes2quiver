@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+import os, sqlite3, json, struct, re, zipfile, sys
+from zlib import decompress
+import xml.etree.ElementTree as ET
+
+# protobuf parser
+
+def uvarint(data,pos):
+    x = s = 0
+    while True:
+        b = data[pos]
+        pos += 1
+        x = x | ((b&0x7f)<<s)
+        if b < 0x80: return x,pos
+        s += 7
+
+def readbytes(data,pos):
+    l,pos = uvarint(data,pos)
+    return data[pos:pos+l], pos+l
+
+def readstruct(fmt,l):
+    return lambda data,pos: (struct.unpack_from(fmt,data,pos)[0],pos+l)
+
+readers = [ uvarint, readstruct('<d',8), readbytes, None, None, readstruct('<f',4) ]
+
+def parse(data, schema):
+    "parses a protobuf"
+    obj = {}
+    pos = 0
+    while pos < len(data):
+        val,pos = uvarint(data,pos)
+        typ = val & 7
+        key = val >> 3
+        val, pos = readers[typ](data,pos)
+        if key not in schema: 
+            continue
+        name, repeated, typ = schema[key]
+        if isinstance(typ, dict):
+            val = parse(val, typ)
+        if typ == 'string':
+            val = val.decode('utf8')
+        if repeated:
+            val = obj.get(name,[]) + [val]
+        obj[name] = val
+    return obj
+
+# HTML construction utils
+
+def append(rval,a):
+    "append a to rval and return a"
+    if isinstance(a,str):
+        i = len(rval)-1
+        if i<0:
+            rval.text = (rval.text or "")+a
+        else:
+            rval[i].tail = (rval[i].tail or "")+a
+    elif isinstance(a,ET.Element):
+        rval.append(a)
+    elif isinstance(a,dict):
+        rval.attrib.update(a)
+    else:
+        raise Exception(f"unhandled type {type(a)}")
+    return a
+
+def E(tag,*args,**attrs):
+    tag,*cc = tag.split('.')
+    rval = ET.Element(tag)
+    tail = None
+    if cc: rval.set('class',' '.join(cc))
+    if attrs:
+        append(rval,attrs)
+    for a in args:
+        append(rval,a)
+    return rval
+
+# Util for processing CRArchive
+
+def process_archive(table):
+    "Decode a 'CRArchive' (for tables)"
+    objects = []
+
+    def dodict(v):
+        return {coerce(e['key']):coerce(e['value']) for e in v.get('element',[])}
+
+    def coerce(o):
+        [(k,v)] = o.items()
+        if 'custom' == k:
+            rval = dict((table['keyItem'][e['key']],coerce(e['value'])) for e in v['mapEntry'])
+            typ = table['typeItem'][v['type']]
+            if typ == 'com.apple.CRDT.NSUUID':
+                return table['uuidItem'][rval['UUIDIndex']]
+            if typ == 'com.apple.CRDT.NSString':
+                return rval['self']
+            return rval
+        if k == 'objectIndex':
+            return coerce(table['object'][v])
+        if k == 'registerLatest':
+            return coerce(v['contents'])
+        if k == 'orderedSet':
+            elements = dodict(v['elements'])
+            contents = dodict(v['ordering']['contents'])
+            rval = []
+            for a in v['ordering']['array']['attachments']:
+                value = contents[a['uuid']]
+                if value not in rval and a['uuid'] in elements:
+                    rval.append(value)
+            return rval
+        if k == 'dictionary':
+            return dodict(v)
+        if k in ('stringValue','unsignedIntegerValue','string'):
+            return v
+        raise Exception(f"unhandled type {k}")
+
+    return coerce(table['object'][0])
+
+# HTML
+
+def render_html(note,get_attach=lambda x:None):
+    if note is None:
+        return ""
+    "Convert note attributed string to HTML"
+    # TODO
+    # - attachments
+    styles = {0:'h1',1:'h2',4:'pre',100:'li',101:'li',102:'li',103:'li'}
+    rval = E('div')
+    txt = note['string']
+    pos = 0
+    par = None
+    for run in note.get('attributeRun',[]):
+        l = run['length']
+        for frag in re.findall(r'\n|[^\n]+',txt[pos:pos+l]):
+            if par is None: # start paragraph
+                pstyle = run.get('paragraphStyle',{}).get('style',-1)
+                indent = run.get('paragraphStyle',{}).get('indent',0)
+                if pstyle >= 100: # this mess handles merging todo lists
+                    tag = ['ul','ul','ol','ul'][pstyle - 100]
+                    par = rval
+                    while indent > 0:
+                        last = par.getchildren()[-1]
+                        if last.tag != tag:
+                            break
+                        par = last
+                        indent -= 1
+                    while indent >= 0:
+                        par = append(par,E(tag))
+                        indent -= 1
+                    par = append(par,E('li'))
+                elif pstyle == 4 and rval.getchildren()[-1].tag == 'pre':
+                    par = rval.getchildren()[-1]
+                    append(par,"\n")
+                else:
+                    par = append(rval,E(styles.get(pstyle,'p')))
+                if pstyle == 103:
+                    par.append(E('input',{"type":"checkbox"}))
+                    if run.get('todo',{}).get('done'):
+                        par[0].put('checked','')
+            if frag == '\n':
+                par = None
+            else:
+                link = run.get('link')
+                info = run.get('attachmentInfo')
+                style = run.get('fontHints',0) + 4*run.get('underline',0) + 8*run.get('strikethrough',0)
+                if style & 1: frag = E('b',frag)
+                if style & 2: frag = E('em',frag)
+                if style & 4: frag = E('u',frag)
+                if style & 8: frag = E('strike',frag)
+                if info:
+                    attach = get_attach(info.get('attachmentIdentifier'))
+                    if attach is not None:
+                        frag = attach
+                if link:
+                    frag = E('a',frag,href=link)
+
+                append(par,frag)
+        pos += l
+    return rval
+
+def render_table_html(table):
+    "Render a table to html"
+    table = process_archive(table)
+    rval = E('table')
+    for row in table['crRows']:
+        tr = E('tr')
+        rval.append(tr)
+        for col in table['crColumns']:
+            cell = table.get('cellColumns').get(col,{}).get(row)
+            td = E('td',render_html(cell))
+            rval.append(td)
+    return rval
+
+
+# protobuf schema
+
+s_string = {
+    2: [ "string", 0, "string"],
+    5: [ "attributeRun", 1, {
+        1: ["length",0,0],
+        2: ["paragraphStyle", 0, {
+            1: ["style", 0,0],
+            4: ["indent",0,0],
+            5: ["todo",0,{ 
+                1: ["todoUUID", 0, "bytes"],
+                2: ["done",0,0]
+            }]
+        }],
+        5: ["fontHints",0,0],
+        6: ["underline",0,0],
+        7: ["strikethrough",0,0],
+        9: ["link",0,"string"],
+        12: [ "attachmentInfo", 0, {
+            1: [ "attachmentIdentifier", 0, "string"],
+            2: [ "typeUTI", 0, "string"]
+        }]
+    }]
+}
+
+s_doc = { 2: ["version", 1, { 3: ["data", 0, s_string ]}]}
+
+# this essentially is a variant type
+s_oid = { 2:["unsignedIntegerValue",0,0], 4:["stringValue",0,'string'], 6:["objectIndex",0,0] }
+s_dictionary = {1:["element",1,{ 1:["key",0,s_oid], 2:["value",0,s_oid]}]}
+s_table = { 2: ["version", 1, { 3: ["data", 0, {
+    3: ["object",1,{
+        1:["registerLatest",0,{2:["contents",0,s_oid]}],
+        6:["dictionary",0,s_dictionary],
+        10:["string",0,s_string],
+        13:["custom",0,{
+            1:["type",0,0],
+            3:["mapEntry",1,{
+                1:["key",0,0],
+                2:["value",0,s_oid]
+            }]
+        }],
+        16:["orderedSet",0,{
+            1: ["ordering",0, {
+                1:["array",0,{
+                    1:["contents",0,s_string],
+                    2:["attachments",1,{1:["index",0,0],2:["uuid",0,0]}]
+                }],
+                2:["contents",0,s_dictionary]
+            }],
+            2: ["elements",0,s_dictionary]
+        }]
+    }],
+    4:["keyItem",1,"string"],
+    5:["typeItem",1,"string"],
+    6:["uuidItem",1,"bytes"]
+}]}]}
+
+
+if __name__ == '__main__':
+    import uuid
+    from hashlib import md5
+
+    def write(data,*path):
+        path = os.path.join(*path)
+        os.makedirs(os.path.dirname(path),exist_ok=True)
+        open(path,'wb').write(data)
+
+    def writej(data,*path):
+        write(json.dumps(data,indent=True).encode('utf8'),*path)
+
+    dest = 'notes.qvnotebook'
+    if len(sys.argv)>1:
+        dest = sys.argv[1]
+
+    root = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes")
+    dbpath = os.path.join(root,'NoteStore.sqlite')
+    db = sqlite3.Connection(dbpath)
+
+    fn = os.path.join(dest,'meta.json')
+    if not os.path.exists(fn):
+        import uuid
+        writej({'name': 'Notes', 'uuid': str(uuid.uuid4())},fn)
+
+    # process attachments first
+    attachments = {}
+    mquery = '''select a.zmergeabledata, a.ztypeuti, b.zidentifier, b.zfilename, a.zurlstring,a.ztitle
+                  from ziccloudsyncingobject a left join ziccloudsyncingobject b on a.zmedia = b.z_pk
+                 where a.zcryptotag is null and a.ztypeuti is not null and a.zidentifier = ?'''
+
+    nquery = '''select a.zidentifier, a.ztitle1, a.zcreationdate1, a.zmodificationdate1, n.zdata 
+                  from zicnotedata n 
+                  join ziccloudsyncingobject a on a.znotedata = n.z_pk 
+                 where n.zcryptotag is null and zdata is not null and zmarkedfordeletion is not 1'''
+
+    # For each note
+    for id,title,create,modify,data in db.execute(nquery):
+        dn = id+'.qvnote'
+        
+        def get_attach(id):
+            "Find attachment via db / filesystem, copy into note and return html to reference it"
+            row = db.execute(mquery,(id,)).fetchone()
+            if not row:
+                print("Missed attachment",id)
+                return ""
+
+            data, typ, id2, fname, url, title = row
+            if typ == 'com.apple.notes.table' and data:
+                doc = parse(decompress(data,47),s_table)
+                return render_table_html(doc['version'][0]['data'])
+            elif typ == 'public.url':
+                # there is a preview image somewhere too, but not sure I care
+                return E("a",title,href=url)
+            elif fname:
+                fn = os.path.join('Media',id2,fname)
+            else:
+                fn = os.path.join('FallbackImages',id+'.jpg')
+
+            src = os.path.join(root,fn)
+            if os.path.exists(src):
+                data = open(src,'rb').read()
+                hc = md5(data).hexdigest().upper()
+                _,ext = os.path.splitext(src)
+                fn2 = hc+ext
+                write(data, dest, dn, 'resources', fn2)
+                if ext in ['.jpg','.jpeg','.png','.tiff']:
+                    return E('img', src=f'quiver-image-url/{fn2}',alt=fn)
+                else:
+                    return E('a',fn,href=f'quiver-file-url/{fn2}')
+            print("fail",id,typ)
+            return E('span')
+
+        pb = decompress(data,47)
+        doc = parse(pb,s_doc)['version'][0]['data']
+        section = render_html(doc,get_attach)
+        section = ET.tostring(section,method="html").decode('utf8')
+
+        unix_ts = 0
+        content = {'title': title, 'cells': [{ 'type': 'text', 'data': section }]}
+        meta = {'uuid':id, 'created_at': int(create)+978307200, 'tags': [], 'title': title, 'updated_at': int(modify)+978307200}
+        writej(content, dest, dn, 'content.json')
+        writej(meta, dest, dn, 'meta.json')
+
+    print(f"wrote files to {dest}")
