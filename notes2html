@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 
 # HTML construction utils
 
+
 def append(rval,a):
     "append a to rval and return a"
     if isinstance(a,str):
@@ -345,9 +346,13 @@ if __name__ == '__main__':
     for id,data in db.execute(nquery):
         pb = decompress(data,47)
         doc = parse(pb,s_doc)['version'][0]['data']
+        title = doc['string'].split('\n')[0]
+        title = 'untitled' if title.strip() == '' else title
+        title = title[:20] if len(title)>20 else title
+        print(title)
         section = render_html(doc,attachments)
         section.tag = 'section'
         hdoc = E('html',E('head',E('style',css)),E('body',section))
-        write(ET.tostring(hdoc,method='html'),dest,f'{id}.html')
+        write(ET.tostring(hdoc,method='html'),dest,f'{title}.html')
 
     print(f"wrote files to {dest} directory")
