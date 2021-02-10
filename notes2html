@@ -321,7 +321,7 @@ if __name__ == '__main__':
             attachments[id] = {'html': render_table(doc['version'][0]['data']) }
         elif typ == 'public.url':
             # there is a preview image somewhere too, but not sure I care
-            attachments[id] = {'html': E('a',{'href':url},title)}
+            attachments[id] = {'html': E('a',{'href':url},title or url)}
         elif fname:
             fn = os.path.join('Media',id2,fname)
             if typ in ['public.tiff','public.jpeg','public.png']:
