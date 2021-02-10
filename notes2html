@@ -120,11 +120,11 @@ def render_html(note,attachments={}):
             if par is None: # start paragraph
                 pstyle = run.get('paragraphStyle',{}).get('style',-1)
                 indent = run.get('paragraphStyle',{}).get('indent',0)
-                if pstyle > 100: # this mess handles merging todo lists
+                if pstyle > 100: # this mess handles merging bulleted lists
                     tag = ['ul','ul','ol','ul'][pstyle - 100]
                     par = rval
                     while indent > 0:
-                        last = par.getchildren()[-1]
+                        last = par[-1]
                         if last.tag != tag:
                             break
                         par = last
@@ -133,15 +133,15 @@ def render_html(note,attachments={}):
                         par = append(par,E(tag))
                         indent -= 1
                     par = append(par,E('li'))
-                elif pstyle == 4 and rval.getchildren()[-1].tag == 'pre':
-                    par = rval.getchildren()[-1]
+                elif pstyle == 4 and rval[-1].tag == 'pre':
+                    par = rval[-1]
                     append(par,"\n")
                 else:
                     par = append(rval,E(styles.get(pstyle,'p')))
                 if pstyle == 103:
                     par.append(E('input',{"type":"checkbox"}))
-                    if run.get('todo',{}).get('done'):
-                        par[0].put('checked','')
+                    if run.get('paragraphStyle',{}).get('todo',{}).get('done'):
+                        par[0].set('checked','')
             if frag == '\n':
                 par = None
             else:
