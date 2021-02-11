@@ -364,6 +364,7 @@ if __name__ == '__main__':
         where n.zcryptotag is null and zdata is not null'''
 
     seen = set()
+    count = 0
     for id,title,data in db.execute(nquery):
         pb = decompress(data,47)
         doc = parse(pb,s_doc)['version'][0]['data']
@@ -372,14 +373,19 @@ if __name__ == '__main__':
         hdoc = E('html',E('head',E('style',css)),E('body',section))
         fn = id
         if use_title and title:
-            tmp = title.replace('/','_')
+            tmp = title.replace('/','_')[:64]
             fn = tmp
             ix = 1
             while fn in seen:
                 fn = tmp + '_' + str(ix)
                 ix += 1
             seen.add(fn)
+        html = ET.tostring(hdoc,method='html')
+        try:
+            write(html,dest,f'{fn}.html')
+        except:
+            print(f'write to {fn}.html failed, trying {id}.html')
+            write(html,dest,f'{fn}.html')
+        count += 1
 
-        write(ET.tostring(hdoc,method='html'),dest,f'{fn}.html')
-
-    print(f"wrote files to {dest} directory")
+    print(f"wrote {count} documents to {dest}")
