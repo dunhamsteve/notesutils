@@ -10,11 +10,20 @@ Description of how notes data is stored.
 
 ## `notes2bear`
 
-Writes a notes.bearbk file in Bear's backup format (a zip file with their own markup flavor).  It doesn't handle tables because Bear doesn't do tables yet. This shaves about 100 lines from the script.
+Writes a `notes.bearbk` file in Bear's backup format (a zip file with their own markup flavor).  It doesn't handle tables because Bear doesn't do tables yet. This shaves about 100 lines from the script.
 
 ## `notes2html` 
 
-Exports notes to tree of html files and images.  One html file per note and any associated media in the media directory. It will convert tables and also tries to export drawings as svg. (Notes also provides a jpg rendering that I use in `notes2bear`.)
+`notes2html` takes an destination directory and writes a tree of html files and images.  One html file per note and any associated media in the media directory. If you specify `--title` the files with be named with the title guessed by Apple (with / replaced by _).  If you specify `--svg`, any drawings will be rendered as inline SVG; otherwise, the fallback jpg files provided by Apple will be used.
+
+Usage is:
+
+```
+notes2html [--svg] [--title] dest
+```
+
+
+
 
 
 

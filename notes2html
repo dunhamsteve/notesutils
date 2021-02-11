@@ -299,9 +299,31 @@ if __name__ == '__main__':
 .dashitem { list-style-type: none; }
 .dashitem:before { content: "-"; text-indent: -5px }
 '''
-    dest = 'notes'
-    if len(sys.argv)>1:
-        dest = sys.argv[1]
+
+    def help():
+        print(f'Usage:\n')
+        print(f'   {sys.argv[0]} [--svg] [--title] dest')
+        print(f'   --svg    Use svg for drawings')
+        print(f'   --title  Use title for filenames')
+        print(f'   dest     destination directory')
+        print()
+        exit(-1)
+
+    dest = None
+    use_svg = False    
+    use_title = False
+    for x in sys.argv[1:]:
+        if x == '--svg': use_svg = True
+        elif x == '--title': use_title = True
+        elif x.startswith('--'):
+            help()
+        else:
+            dest = x
+
+    if not dest:
+        help()
+
+
     root = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes")
     dbpath = os.path.join(root,'NoteStore.sqlite')
     write(open(dbpath,'rb').read(),dest,'NoteStore.sqlite')
@@ -313,7 +335,7 @@ if __name__ == '__main__':
         from ziccloudsyncingobject a left join ziccloudsyncingobject b on a.zmedia = b.z_pk
         where a.zcryptotag is null and a.ztypeuti is not null'''
     for id, data, typ, id2, fname, url,title in db.execute(mquery):
-        if typ == 'com.apple.drawing' and data:
+        if typ == 'com.apple.drawing' and data and use_svg:
             doc = parse(decompress(data,47),s_drawing)
             attachments[id] = {'html': svg(doc['version'][0]['data'])}
         elif typ == 'com.apple.notes.table' and data:
@@ -332,22 +354,32 @@ if __name__ == '__main__':
             if os.path.exists(src):
                 write(open(src,'rb').read(),dest,fn)
         else:
-
             fn = os.path.join('FallbackImages',id+'.jpg')
             src = os.path.join(root,fn)
             if os.path.exists(src):
                 attachments[id] = {'html': E('img',{'src':fn})}
                 write(open(src,'rb').read(),dest,fn)
             
-    nquery = '''select a.zidentifier, n.zdata from zicnotedata n join ziccloudsyncingobject a on a.znotedata = n.z_pk 
+    nquery = '''select a.zidentifier, a.ztitle1, n.zdata from zicnotedata n join ziccloudsyncingobject a on a.znotedata = n.z_pk 
         where n.zcryptotag is null and zdata is not null'''
 
-    for id,data in db.execute(nquery):
+    seen = set()
+    for id,title,data in db.execute(nquery):
         pb = decompress(data,47)
         doc = parse(pb,s_doc)['version'][0]['data']
         section = render_html(doc,attachments)
         section.tag = 'section'
         hdoc = E('html',E('head',E('style',css)),E('body',section))
-        write(ET.tostring(hdoc,method='html'),dest,f'{id}.html')
+        fn = id
+        if use_title and title:
+            tmp = title.replace('/','_')
+            fn = tmp
+            ix = 1
+            while fn in seen:
+                fn = tmp + '_' + str(ix)
+                ix += 1
+            seen.add(fn)
+
+        write(ET.tostring(hdoc,method='html'),dest,f'{fn}.html')
 
     print(f"wrote files to {dest} directory")
