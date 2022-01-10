@@ -366,26 +366,52 @@ if __name__ == '__main__':
     seen = set()
     count = 0
     for id,title,data in db.execute(nquery):
-        pb = decompress(data,47)
-        doc = parse(pb,s_doc)['version'][0]['data']
-        section = render_html(doc,attachments)
-        section.tag = 'section'
-        hdoc = E('html',E('head',E('style',css)),E('body',section))
-        fn = id
-        if use_title and title:
-            tmp = title.replace('/','_')[:64]
-            fn = tmp
-            ix = 1
-            while fn in seen:
-                fn = tmp + '_' + str(ix)
-                ix += 1
-            seen.add(fn)
-        html = ET.tostring(hdoc,method='html')
-        try:
-            write(html,dest,f'{fn}.html')
-        except:
-            print(f'write to {fn}.html failed, trying {id}.html')
-            write(html,dest,f'{fn}.html')
-        count += 1
+        if count < 10000: # parse each document start
+            pb = decompress(data,47)
+            doc = parse(pb,s_doc)['version'][0]['data']
+            has_todo_list = False
+            if doc['attributeRun']:
+                text = doc["string"]
+                print(len(text))
+                print(type(text))
+                todo_list = []
+                list_attribute = doc["attributeRun"]
+                for p_with_attribute in list_attribute: # attributeを持つ行を特定
+                    if p_with_attribute.get("paragraphStyle"):
+                        print(p_with_attribute)
+                        if p_with_attribute.get("paragraphStyle").get('todo'):
+                            # print(attribute['paragraphStyle']['todo'])
+                            todo = p_with_attribute['paragraphStyle']['todo']
+                            has_todo_list = True
+                            print(todo)
+                            todo_list.append(todo)    
+                # print(list_attribute)
+                print(type(list_attribute))
+                if todo_list:
+                    print(f"here is todo list from {count}th document", todo_list)
+            if has_todo_list: # todoを持つdocumentのみ処理
+                section = render_html(doc,attachments)
+                section.tag = 'section'
+                hdoc = E('html',E('head',E('style',css)),E('body',section))
+                fn = id
+                if use_title and title:
+                    tmp = title.replace('/','_')[:64]
+                    fn = tmp
+                    ix = 1
+                    while fn in seen:
+                        fn = tmp + '_' + str(ix)
+                        ix += 1
+                    seen.add(fn)
+                html = ET.tostring(hdoc,method='html')
+                try:
+                    write(html,dest,f'test_{count}_{fn}.html')
+                except:
+                    print(f'write to {fn}.html failed, trying {id}.html')
+                    write(html,dest,f'{fn}.html')
+            else: # todoを持たないdocumentを処理しない
+                pass
+            count += 1 # parsing document ends
+        else:
+            break
 
     print(f"wrote {count} documents to {dest}")
