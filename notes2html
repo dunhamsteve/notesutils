@@ -373,7 +373,7 @@ if __name__ == '__main__':
         hdoc = E('html',E('head',E('style',css)),E('body',section))
         fn = id
         if use_title and title:
-            tmp = title.replace('/','_')[:64]
+            tmp = title.replace(':','_').replace('/','_')[:64]
             fn = tmp
             ix = 1
             while fn in seen:
