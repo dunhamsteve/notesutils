@@ -154,7 +154,7 @@ def render_html(note,attachments={}):
                 if style & 8: frag = E('strike',frag)
                 if info:
                     attach = attachments.get(info.get('attachmentIdentifier'))
-                    if attach and attach.get('html'):
+                    if attach and 'html' in attach:
                         frag = attach.get('html')
                 append(par,frag)
         pos += l
